@@ -1,25 +1,9 @@
-# Ersetzt die seit Mai 2026 4x rote rolling-release.yml.
-#
-# Build-Flow:
-#   1. setup-pnpm + setup-node (nvmrc)
-#   2. pnpm install --no-frozen-lockfile (pnpm-lock.yaml ist out-of-sync,
-#      GH Actions setzt CI=true -> pnpm install defaultet zu --frozen-lockfile)
-#   3. pnpm run build (tsc && vite build -> dist/)
-#   4. docker/build-push-action -> ghcr.io/vfeeg-development/vfeeg-web
-#      (keycloak-config.json ist als Caddy-Env-Template eingecheckt und wird
-#      via `ADD keycloak-config.json /srv` gebacken; Caddy rendert es zur
-#      Laufzeit aus KEYCLOAK_URL/_REALM/_CLIENT_ID — kein Runtime-Mount noetig)
-#   5. Build-Provenance-Attestation
-#   6. dispatch-deploy -> repository_dispatch deploy-web ans Platform-Repo
-#
-# STUFE 3 (2026-06-18): Development-Tier (ADR-0005). Image pusht nach
-# `ghcr.io/vfeeg-development/vfeeg-web` (Login via VFEEG_DEV_PUSH_PAT), und der
-# dispatch-deploy-Job triggert den Cluster-Rollout (Platform deploy-on-dispatch.yml,
-# event_type deploy-web). Prod-Release-Tier eegfaktura/* bleibt unberuehrt.
-#
-# Vorbedingung Stufe 3 (beide im eegfaktura-web-Repo gesetzt):
-#   - VFEEG_DEV_PUSH_PAT  (Classic-PAT mit write:packages auf vfeeg-development)
-#   - PLATFORM_DEPLOY_PAT (fine-grained, repository_dispatch aufs Platform-Repo)
+# gemeinstrom-Fork-Variante des upstream rolling-release-Workflows.
+# Delta zum Upstream:
+#   - Push nach ghcr.io/gemeinstrom/* statt ghcr.io/vfeeg-development/*
+#   - GITHUB_TOKEN statt VFEEG_DEV_PUSH_PAT (same-org push)
+#   - dispatch-deploy Jobs entfernt (Cutover läuft kontrolliert manuell)
+# Aufgesetzt im Rahmen des Cutover-Plans 2026-07-12.
 
 name: Docker Image CI
 
@@ -31,15 +15,10 @@ on:
       - 'preview/**'
     tags:
       - v*
-  pull_request:
-    branches:
-      - master
-      - main
 
 env:
   REGISTRY: "ghcr.io"
-  # Development-Tier (ADR-0005): Dev-Cluster zieht aus vfeeg-development/vfeeg-web.
-  IMAGE_NAME: "vfeeg-development/vfeeg-web"
+  IMAGE_NAME: gemeinstrom/${{ github.event.repository.name }}
 
 jobs:
   build-and-push-image:
@@ -54,33 +33,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.12.1
-          run_install: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: ".nvmrc"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        # --no-frozen-lockfile: pnpm-lock.yaml ist im Source-Repo out-of-sync
-        # mit package.json. GH Actions setzt CI=true, pnpm install defaultet
-        # damit zu --frozen-lockfile und failt sofort. Long-term-Fix waere
-        # `pnpm install` lokal + commit pnpm-lock.yaml.
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Build SPA (vite build only — skip tsc due to type drift)
-        # package.json "build" ist "tsc && vite build". tsc failt mit ~30
-        # Errors (fehlende Test-Type-Defs, oidc-client-ts nicht gefunden,
-        # Ionic-API-Drift, AuthService-API-Drift). Probe-Workflow:
-        # vite build direkt aufrufen - vite kompiliert TS, ohne strict type-check.
-        # So sehen wir, ob's neben tsc noch weitere Build-Blocker gibt.
-        run: pnpm exec vite build
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
@@ -108,88 +60,32 @@ jobs:
             org.opencontainers.image.vendor="Verein zur Förderung von Erneuerbaren Energiegemeinschaften"
             org.opencontainers.image.licenses=${{ github.event.repository.license.spdx_id || '' }}
             org.opencontainers.image.ref.name=${{ github.ref || '' }}
+            org.opencontainers.image.ref.branch=${{ github.ref_type == 'branch' && github.ref || '' }}
+            org.opencontainers.image.ref.tag=${{ github.ref_type == 'tag' && github.ref || '' }}
             org.opencontainers.image.ref.sha=${{ github.sha || '' }}
             org.opencontainers.image.repository=${{ github.repository || '' }}
+            org.opencontainers.image.repository.url=${{ github.event.repository.html_url || '' }}
 
       - name: Login to Container Registry
-        # PR-Builds duerfen nicht pushen — Login nur bei push.
-        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          # GITHUB_TOKEN darf nicht ins fremde vfeeg-development-Package pushen
-          # (GHCR package-repo-binding -> denied). Classic-PAT mit write:packages.
           username: ${{ github.actor }}
-          password: ${{ secrets.VFEEG_DEV_PUSH_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build (PR) / Build and push (push)
-        id: build
+      - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags || 'latest' }}
           labels: ${{ steps.meta.outputs.labels || '' }}
           annotations: ${{ steps.meta.outputs.annotations }}
 
       - name: Generate artifact attestation
-        if: github.event_name == 'push'
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-
-  # Stufe 3: Cluster-Rollout im Platform-Repo triggern, nachdem :latest gepusht
-  # wurde. Platform deploy-on-dispatch.yml macht rollout restart (PullPolicy=Always
-  # zieht :latest frisch). Nur auf push-to-default-branch, nicht bei PRs.
-  dispatch-deploy:
-    needs: build-and-push-image
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger deploy in platform repo
-        env:
-          GH_TOKEN: ${{ secrets.PLATFORM_DEPLOY_PAT }}
-        run: |
-          PAYLOAD=$(cat <<EOF
-          {
-            "event_type": "deploy-web",
-            "client_payload": {
-              "image_tag": "latest",
-              "source_sha": "${GITHUB_SHA}",
-              "source_repo": "${GITHUB_REPOSITORY}",
-              "source_ref": "${GITHUB_REF}"
-            }
-          }
-          EOF
-          )
-          echo "$PAYLOAD" | gh api repos/vfeeg-development/eegfaktura-platform/dispatches --input -
-          echo "Dispatched deploy-web for sha=${GITHUB_SHA:0:8}"
-
-  # Preview-Deploy (ADR-0007): Push auf preview/** -> pinned Deploy des sha-Builds
-  # in die Dev-Zone, ohne main/Release anzufassen. Nur auf preview/**-Branches.
-  dispatch-preview-deploy:
-    needs: build-and-push-image
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/preview/')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger pinned preview deploy in platform repo
-        env:
-          GH_TOKEN: ${{ secrets.PLATFORM_DEPLOY_PAT }}
-        run: |
-          PAYLOAD=$(cat <<EOF
-          {
-            "event_type": "deploy-web",
-            "client_payload": {
-              "mode": "pinned",
-              "image_tag": "sha-${GITHUB_SHA:0:7}",
-              "source_sha": "${GITHUB_SHA}",
-              "source_repo": "${GITHUB_REPOSITORY}",
-              "source_ref": "${GITHUB_REF}"
-            }
-          }
-          EOF
-          )
-          echo "$PAYLOAD" | gh api repos/vfeeg-development/eegfaktura-platform/dispatches --input -
-          echo "Dispatched pinned preview deploy-web for sha-${GITHUB_SHA:0:7}"
