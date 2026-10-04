@@ -9,6 +9,82 @@ this changelog highlights the changes relevant for overview and operations.
 ## [Unreleased]
 
 ### Fixed
+- **SEPA mandate date saved one day early when creating a member.** The date picker showed the
+  correct day, but after saving the record held the day before. react-hook-form clones the
+  form values in `handleSubmit` and turns every `Date` — including the `LocalDate` the picker
+  stored — into a plain `Date`, which serialises as UTC: local midnight on 4 June became
+  `2026-06-03T22:00:00.000Z`, and the backend kept that date. Editing an existing member was
+  not affected, because that path sends the `LocalDate` directly without the clone. The picker
+  now writes the date into the form as a `YYYY-MM-DD` string, which survives the clone.
+  Mandate dates entered at creation before this fix are still one day early in the data.
+
+### Security
+- The image no longer runs as root. Caddy listens on `:8080` per `caddy.conf`, well above
+  1024, so it never needed the privileges in the first place. A dedicated `app` user
+  (UID/GID 1000) now owns Caddy's XDG directories `/data` and `/config` — without that it
+  fails on startup while writing its own state. The served files under `/var/www` stay
+  root-owned; Caddy only reads them.
+
+### Added
+- CI builds `env/**` branches and deploys the resulting image into the matching feature
+  environment (ADR-0008): a push to `env/<name>` pins this service in namespace `env-<name>`
+  to that branch's `sha-…` image. Previously only the default branch, tags and `preview/**`
+  produced an image at all. The environment itself is still provisioned manually.
+
+### Removed
+- Cypress and Capacitor, neither of which was ever used here. Cypress had a config file but not
+  a single spec, so `test.e2e` ran nothing; Capacitor had no imports anywhere in `src/`, no
+  `android/` or `ios/` project, and a `capacitor.config.ts` that was still the untouched Ionic
+  starter — `appId: 'io.ionic.starter'`, `webDir: 'build'` rather than Vite's `dist`, and a
+  missing comma that made the file syntactically invalid. It cannot ever have run.
+
+  Removed: the five `@capacitor/*` runtime packages, `@capacitor/cli`, `cypress`, both config
+  files, the `test.e2e` script and the Capacitor entry in `ionic.config.json`. The dependency
+  tree drops from 601 to 472 packages.
+
+  To be clear about the motive: this closes **no** additional security alerts — the vite,
+  cypress and capacitor upgrades already did that work. This is about not carrying scaffolding
+  that produces alerts, install time and maintenance questions without ever being used. Should
+  end-to-end tests or a mobile build become real goals, they are better set up deliberately
+  than inherited from a starter template three majors out of date.
+
+### Security
+- `vite` 5.4.9 -> 6.4.3, which also pulls `rollup` 4.63.1, `esbuild` 0.25.12, `postcss` 8.5.28
+  and `nanoid` 3.3.18 through the build tree. This closes **22 of the 75 open Dependabot
+  alerts** (6 HIGH, 14 MEDIUM, 2 LOW) — among them CVE-2026-53571 (vite) and CVE-2026-27606
+  (rollup). All of it is build tooling that never reaches the browser bundle, so this is about
+  the integrity of the build, not about the shipped application.
+- `cypress` 13.15.0 -> 16.0.0. Cypress dragged in most of the remaining vulnerable build
+  packages; the upgrade drops `extract-zip`, `@xmldom/xmldom`, `@babel/core`,
+  `@babel/plugin-transform-modules-systemjs`, `@babel/runtime` and `@tootallnate/once` from the
+  tree entirely and lifts `tmp` to 0.2.7. Notably `extract-zip` carried a HIGH advisory with
+  **no fix published**, so an upgrade was the only way to be rid of it. Together with the vite
+  bump this closes 37 of the 75 open alerts (13 HIGH, 18 MEDIUM, 6 LOW).
+- `@capacitor/cli` 5.6.0 -> 8.5.1, lifting `tar` 6.2.1 -> 7.5.22. `tar` alone accounted for six
+  HIGH advisories and reached the tree solely through this package. Only the CLI moved: the
+  Capacitor plugins declare a peer range on `@capacitor/core`, not on the CLI, so the family
+  stays consistent. Cumulative across the three bumps: **45 of the 75 alerts closed**
+  (19 HIGH, 20 MEDIUM, 6 LOW).
+- The `pnpm.overrides` pin on `form-data` survived the update (resolved: 4.0.6). That is worth
+  checking on every dependency change here: pnpm 10 and newer no longer read that field and
+  drop the pin silently, with only a warning. Build with pnpm 9.12.1, as CI does.
+
+## [1.0.12] – 2026-09-07
+
+### Changed
+- Deployment-only release: rebuilt against a refreshed base image, with Dependabot now
+  watching the `docker` ecosystem. No changes to the application itself — the version
+  exists so the production pin matches a named release.
+
+## [1.0.11] – 2026-07-16
+
+### Fixed
+- SEPA export with "Mitglieder zusammenfassen" enabled booked the **net** amount for credit
+  notes (Gutschriften) instead of the **gross** amount, so payouts to VAT-liable producers were
+  short by the VAT. The summarize path (`summerizeSepaModel`) subtracted
+  `Rechnungsbetrag Netto` for non-invoice documents, while the non-summarize path and invoices
+  use `Rechnungsbetrag Brutto`. The checkbox is a pure per-IBAN aggregation and must not change
+  the amount basis; it now uses gross for credit notes too, matching the other path.
 - Member view bottom filter buttons (person/consumption, producer/consumer) no longer showed the
   active-filter highlight, so the selected filter was only inferrable from the result list. The
   `.isActive` state set `--background` on an `IonButton` that defaults to `fill="clear"` inside
