@@ -14,7 +14,9 @@ export interface Eeg {
   contactPerson: string;
   settlementInterval: 'MONTHLY' | "ANNUAL" | "BIANNUAL" | "QUARTER";
   allocationMode: "DYNAMIC" | "STATIC"
-  area: "LOCAL" | "REGIONAL" | "BEG" | "GEA"
+  area: "LOCAL" | "REGIONAL" | "BEG" | "GEA" | "P2P" | "EVA"
+  // zone level 1–7 from the metering point list (platform#229), read only; null or missing = unknown
+  ecZoneLevel?: number | null
   communityId: string;
   address: Address;
   contact: Contact;
@@ -111,7 +113,8 @@ export interface EegRate {
   items: EegRateItem[];
 }
 
-export type SepaDirectDebitType = 'B2B' | 'CORE' | 'NONE';
+// '' = not chosen yet: no direct debit (platform#143)
+export type SepaDirectDebitType = 'B2B' | 'CORE' | 'NONE' | '';
 
 export enum RateTypeEnum {
   AHEAD = "Vorauszahlung",
@@ -140,6 +143,7 @@ export const ezpType: EegRateItem[] = [
 ]
 
 export interface EegTariff {
+  version?: number;
   id: string;
   name: string;
   type: "EEG" | "EZP" | "VZP" | "AKONTO";
@@ -158,7 +162,59 @@ export interface EegTariff {
   meteringPointFee?: number
   meteringPointVat?: number
   billingPeriod?: string
+  // ZVT (zeitvariabler Tarif): centPerKWh ist der Basispreis; bis zu zwei
+  // Zeitfenster mit eigenem Preis (HH:MM, 15-min-Raster, Von>Bis = Mitternacht)
+  useTimeTariff?: boolean
+  timeTariff1Active?: boolean
+  timeTariff1Name?: string
+  timeTariff1From?: string
+  timeTariff1To?: string
+  timeTariff1CentPerKWh?: number
+  timeTariff2Active?: boolean
+  timeTariff2Name?: string
+  timeTariff2From?: string
+  timeTariff2To?: string
+  timeTariff2CentPerKWh?: number
+  // Joining fee (type EEG only, 0/false otherwise): net amount in €, charged once with the member's first energy
+  // billing, with its own VAT setting (platform#217)
+  joiningFee?: number
+  joiningFeeUseVat?: boolean
+  joiningFeeVatInPercent?: number
 }
+
+// billing GET /api/billingDocuments/tenant/{tenantId}/joiningFeeState: one entry per member with a final document
+// in the community (members without one are missing = not energy billed, no fee); passed on to the member export
+export interface JoiningFeeState {
+  participantId: string
+  energyBilled: boolean
+  joiningFee: { documentNumber: string, documentDate: string } | null
+  // extension 2026-10-27, missing from an older billing: the fee is requested for the next final run / was paid
+  // outside eegfaktura (members with only such a record are listed too)
+  requested?: boolean
+  paidExternally?: { paidOn: string, note: string | null } | null
+}
+
+// billing GET /api/billingRuns/tenant/{tenantId}/settlementState (platform#230): period identifiers of the final runs
+// with documents and of the runs being calculated; web passes them on to the backend for the interval change
+export interface SettlementState {
+  finalPeriods: string[]
+  runningPeriods: string[]
+}
+
+// backend POST /eeg/settlementinterval: the check (dryRun) or the change; effectiveFrom null = at once
+export interface SettlementIntervalResult {
+  allowed: boolean
+  effectiveFrom: string | null
+  lastFinalPeriod: string | null
+  message: string
+  earliestFrom: string | null
+  eeg: Eeg | null
+}
+
+// billing PUT .../participants/{participantId}/joiningFee
+export type JoiningFeeRecord =
+  | { kind: "CHARGE_REQUESTED" }
+  | { kind: "PAID_EXTERNALLY", paidOn: string, note: string | null }
 
 export enum MONTHNAME {
   Januar = 1,

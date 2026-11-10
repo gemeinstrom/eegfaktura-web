@@ -1,26 +1,4 @@
 
-const EegQuery = `{
-  eeg()
-}`;
-
-export const eegGraphqlQuery = {
-    operationName: null,
-    query: `query EegInfo ${EegQuery}`,
-    variables: {},
-};
-
-const EnergyQuery = (tenant: string, year: number, month: number) => `{
-  eeg(name:"${tenant}", year:${year}, month: ${month})
-}`; // graphQl Query
-
-export const energyGraphqlQuery = (tenant: string, year: number, month: number) => {
-  return {
-    operationName: null,
-    query: `query EnergyInfo ${EnergyQuery(tenant.toLowerCase(), year, month)}`,
-    variables: {},
-  }
-};
-
 const ReportDateQuery = (tenant: string, ecId: string) => `{
   lastEnergyDate(tenant:"${tenant}", ecId: "${ecId}")
 }`; // graphQl Query
@@ -74,7 +52,7 @@ export const loadContractFilesQuery = (tenant: string, participantId: string) =>
   }
 };
 
-export const uploadContractFilesMutation = async (tenant: string, files: File[], participantId: string) => {
+export const uploadContractFileMutation = (tenant: string, file: File, participantId: string) => {
 
   // const fileToBlob = async (file: File) => {
   //   new Blob([new Uint8Array(await file.arrayBuffer())], {type: file.type });
@@ -83,15 +61,16 @@ export const uploadContractFilesMutation = async (tenant: string, files: File[],
   const formData = new FormData();
 
   formData.append("operations", JSON.stringify({
-    query: `mutation StoreContract ($file: Upload!) {
+    query: `mutation StoreContract ($file: Upload!, $name: String!) {
       addFile(
         tenant: "${tenant}"
         file: $file
         fileCategory: "contract"
         attributes: [{key: "category_tag", value: "user"}]
-        name: "${files[0].name}"
+        name: $name
         userId: "${participantId}"
       ) {
+        __typename
         ... on AddFile {
               id
               name
@@ -100,13 +79,16 @@ export const uploadContractFilesMutation = async (tenant: string, files: File[],
               fileDownloadUri
               createdAt
         }
+        ... on AddFileError {
+              message
+        }
       }
     }`,
-    variables: {"file": null},
+    variables: {"file": null, "name": file.name},
     operationName: "StoreContract"
   }))
   formData.append("map", JSON.stringify({"0": ["variables.file"]}))
-  formData.append("0", files[0])
+  formData.append("0", file)
 
   return formData;
 };

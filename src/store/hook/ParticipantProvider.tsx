@@ -1,4 +1,4 @@
-import {createContext, FC, ReactNode, useCallback, useContext, useEffect, useState} from "react";
+import {createContext, FC, ReactNode, useCallback, useContext, useEffect, useMemo, useState} from "react";
 import {EegParticipant} from "../../models/members.model";
 import {useAppDispatch, useAppSelector} from "../index";
 import {
@@ -12,6 +12,9 @@ import {isEEGFetching, useTenant} from "./Eeg.provider";
 import {filterActiveParticipantAndMeter} from "../../util/FilterHelper.unit";
 import {getPeriodDates} from "../../util/FilterHelper";
 import participants from "../../pages/Participants";
+import {ratesMapSelector} from "../rate";
+import {zvtTimeWindows, zvtWindowsKey} from "../../util/Helper.util";
+import {useConfirmDiscard, useReportDirty} from "../../components/core/UnsavedChangesGuard.component";
 
 
 export interface ParicipantState {
@@ -32,8 +35,12 @@ export interface ParicipantState {
   setBillingEnabled: (enabled: boolean) => void
   showAddMeterPane: boolean
   setShowAddMeterPane: (show: boolean) => void
-  checkedParticipant: Record<string, boolean>
-  setCheckedParticipant: (participantId: string, checked: boolean) => void
+  // forms holding unsaved input (changed, failed to save or invalid), by source: switching the member, the billing view
+  // or the community asks first (platform#228 step 4)
+  unsaved: Partial<Record<UnsavedSource, boolean>>
+  setUnsaved: (source: UnsavedSource, dirty: boolean) => void
+  // loads the energy report of the shown period again, e.g. after a failed load (261024-ca26)
+  reloadEnergyReport: () => void
 }
 
 const initialState: ParicipantState = {
@@ -52,8 +59,9 @@ const initialState: ParicipantState = {
   setBillingEnabled: (enabled: boolean) => {},
   showAddMeterPane: false,
   setShowAddMeterPane: (show: boolean) => {},
-  checkedParticipant: {},
-  setCheckedParticipant: (participantId: string, checked: boolean) => {}
+  unsaved: {},
+  setUnsaved: (source: UnsavedSource, dirty: boolean) => {},
+  reloadEnergyReport: () => {},
 }
 
 export const ParticipantContext = createContext(initialState)
@@ -65,6 +73,11 @@ const ParticipantProvider: FC<{children: ReactNode}> = ({children}) => {
   const activePeriod = useAppSelector(selectedPeriodSelector)
   // const participants = useAppSelector(activeParticipantsSelector1)
   const allParticipants = useAppSelector(allParticipantsSelector)
+  const tariffById = useAppSelector(ratesMapSelector)
+  // ZVT: fetch the energy report again when time windows change (tariff switched to time-based, windows edited,
+  // tariffs loaded after the participants); otherwise billing gets time windows without buckets.
+  const zvtKey = useMemo(() => zvtWindowsKey(tariffById,
+    (allParticipants || []).flatMap(p => p.meters.map(m => m.tariff_id).filter(id => !!id))), [tariffById, allParticipants])
 
   const isFechting = isEEGFetching()
 
@@ -72,91 +85,15 @@ const ParticipantProvider: FC<{children: ReactNode}> = ({children}) => {
   const [detailOpen, setDetailOpen] = useState<boolean>(false);
   const [enableBilling, setEnableBilling] = useState<boolean>(false)
   const [showAddMeterPane, setShowAddMeterPane] = useState<boolean>(false)
-  const [checkedParticipants, setCheckedParticipants] = useState<Record<string, boolean>>({})
-  const [activeParticipants, setActiveParticipants] = useState<EegParticipant[]>([])
-
-// Helper function for deep equality check (especially for objects/arrays)
-// This is a common utility you might have or need to implement
-// A simple recursive check for JSON-like objects (primitives, arrays, plain objects)
-  function deepEqual(obj1: any, obj2: any): boolean {
-    if (obj1 === obj2) {
-      return true; // Handles primitives and same object reference
-    }
-
-    if (typeof obj1 !== 'object' || obj1 === null || typeof obj2 !== 'object' || obj2 === null) {
-      return false; // Not objects or one is null
-    }
-
-    const keys1 = Object.keys(obj1);
-    const keys2 = Object.keys(obj2);
-
-    if (keys1.length !== keys2.length) {
-      return false; // Different number of properties
-    }
-
-    for (const key of keys1) {
-      if (!keys2.includes(key) || !deepEqual(obj1[key], obj2[key])) {
-        return false; // Key not found or values are not deep equal
-      }
-    }
-
-    return true;
-  }
-
-  /**
-   * Checks if two arrays are comprised of identical objects based on an ID,
-   * performing a deep comparison of objects with matching IDs.
-   *
-   * @param arr1 The first array of objects.
-   * @param arr2 The second array of objects.
-   * @param idKey The key in the objects that represents the unique ID. Defaults to 'id'.
-   * @param compareKeys The object keys have to be equal
-   * @returns True if the arrays are comprised of identical objects by ID and content,
-   * False otherwise.
-   */
-  function objectsSimilar<T extends Record<string, any>>(
-    arr1: T[],
-    arr2: T[],
-    idKey: keyof T = 'id' as keyof T, // Default to 'id', casting for flexibility
-    compareKeys: string[]
-  ): boolean {
-    if (arr1.length !== arr2.length) {
-      return false;
-    }
-
-    // Create Maps for faster lookup by ID
-    const map1 = new Map<any, T>();
-    for (const obj of arr1) {
-      map1.set(obj[idKey], obj);
-    }
-
-    const map2 = new Map<any, T>();
-    for (const obj of arr2) {
-      map2.set(obj[idKey], obj);
-    }
-
-    // Check if the sets of IDs are identical (same keys in maps)
-    if (map1.size !== map2.size) {
-      return false;
-    }
-
-    for (const id of map1.keys()) {
-      if (!map2.has(id)) {
-        return false; // ID from arr1 not found in arr2
-      }
-
-      const objA = map1.get(id);
-      const objB = map2.get(id);
-
-      for (const a of compareKeys) {
-        if (!objA || !objB || objA[a] !== objB[a]) {
-          return false;
-        }
-      }
-    }
-
-    return true;
-  }
+  const [unsaved, setUnsavedState] = useState<Partial<Record<UnsavedSource, boolean>>>({})
+  const setUnsaved = useCallback((source: UnsavedSource, dirty: boolean) =>
+    setUnsavedState(prev => !!prev[source] === dirty ? prev : {...prev, [source]: dirty}), [])
+  // the members active in the selected period, derived from the store (empty after a community switch, 261024-ca13)
+  const activeParticipants = useMemo(() => {
+    if (!activePeriod || !allParticipants) return []
+    const [start, end] = getPeriodDates(activePeriod)
+    return filterActiveParticipantAndMeter(allParticipants, start, end)
+  }, [allParticipants, activePeriod])
 
   const newRateFn = () => {
     setState({
@@ -185,26 +122,19 @@ const ParticipantProvider: FC<{children: ReactNode}> = ({children}) => {
     setEnableBilling(state);
   }
 
+  // another community (261024-ca13): nothing of the previous one stays open
   useEffect(() => {
-    if (activePeriod && allParticipants) {
-      const [start, end] = getPeriodDates(activePeriod)
-      const _aps = filterActiveParticipantAndMeter(allParticipants, start, end)
-      // const identical = objectsSimilar(activeParticipants, _aps, "id", ["participantSince"])
+    setDetailOpen(false)
+    setShowAddMeterPane(false)
+  }, [tenant.tenant?.toUpperCase()]);
 
-      setActiveParticipants(prevState => _aps.map(s => {
-        // I have no glue why this code is included
-        // const e = prevState.find(n => n.id === s.id)
-        // if (e) {
-        //   return e
-        // }
-        return s
-      }))
-
-      // if (!identical) {
-        fetchEnergyReport(_aps)
-      // }
+  useEffect(() => {
+    // not while the application (re)loads EEG, tariffs and members (tenant switch, refresh): the store can then
+    // mix the old members with the new tenant; the load ends by setting the period, which fetches once
+    if (activePeriod && allParticipants && !isFechting) {
+      fetchEnergyReport(activeParticipants)
     }
-  }, [allParticipants, activePeriod]);
+  }, [activeParticipants, zvtKey, isFechting]);
 
   // useEffect(() => {
   //   fetchEnergyReport(activeParticipants)
@@ -222,30 +152,26 @@ const ParticipantProvider: FC<{children: ReactNode}> = ({children}) => {
     closeDetailPage: closeDetailPageFn,
     billingEnabled: enableBilling,
     setBillingEnabled: setEnableBillingFn,
-    checkedParticipant: checkedParticipants,
     showAddMeterPane: showAddMeterPane,
     setShowAddMeterPane: setShowAddMeterPane,
-    setCheckedParticipant: (participantId: string, checked: boolean) => { setCheckedParticipants((s) => {
-      const newS = {...s}
-      if (!checked) {
-        delete newS[participantId];
-      } else {
-        newS[participantId] = checked
-      }
-      return newS;
-      }
-    )}
+    unsaved: unsaved,
+    setUnsaved: setUnsaved,
+    reloadEnergyReport: () => fetchEnergyReport(activeParticipants),
   } as ParicipantState
 
   const fetchEnergyReport = (aps: EegParticipant[]) => {
     if (tenant && activePeriod && aps && aps.length > 0) {
+      // ZVT: je Zaehlpunkt mit zeitbasiertem Tarif die generischen
+      // Zeitfenster mitschicken - energystore liefert dann buckets zurueck.
       const participantsReport = aps.map(p => {
         return {
           participantId: p.id,
           meters: p.meters.filter(m => !!m.participantState).map(m => {
+            const timeWindows = zvtTimeWindows(tariffById[m.tariff_id])
             return {meterId: m.meteringPoint, meterDir: m.direction,
               from: new Date(m.participantState.activeSince).getTime(),
-              until: new Date(m.participantState.inactiveSince).getTime()} as MeterReport})
+              until: new Date(m.participantState.inactiveSince).getTime(),
+              ...(timeWindows ? {timeWindows} : {})} as MeterReport})
         } as ParticipantReport
       })
       dispatch(fetchEnergyReportV2({tenant: tenant, year: activePeriod.year, segment: activePeriod.segment, type: activePeriod.type, participants: participantsReport.filter(p => p.meters.length > 0)}))
@@ -286,3 +212,21 @@ export const useAllParticipants = () => {
 //   const {rates} = useContext(ParticipantContext);
 //   return rates;
 // }
+
+// "addMeter": the "add metering point" pane; "details": the member or metering point details (failed or invalid
+// changes); "tariff": the tariff editor
+export type UnsavedSource = "addMeter" | "details" | "tariff"
+
+// Asks before an action replaces forms of the given sources while one holds unsaved input (platform#228 step 4).
+export const useLeaveUnsaved = (sources: UnsavedSource[]) => {
+  const {unsaved} = useContext(ParticipantContext)
+  const confirmDiscard = useConfirmDiscard()
+  return (action: () => void, onCancel?: () => void) =>
+    confirmDiscard(sources.some(s => unsaved[s]), action, onCancel)
+}
+
+// A form reports its unsaved input under its source while it is shown.
+export const useReportUnsaved = (source: UnsavedSource, dirty: boolean) => {
+  const {setUnsaved} = useContext(ParticipantContext)
+  useReportDirty(dirty, d => setUnsaved(source, d))
+}

@@ -1,4 +1,4 @@
-import React, {FC, MouseEventHandler, useEffect, useState} from "react";
+import React, {DragEvent, FC, MouseEventHandler, useEffect, useRef, useState} from "react";
 import {
   IonButton, IonButtons,
   IonCard, IonCol, IonGrid,
@@ -8,7 +8,7 @@ import {
   IonList,
   IonListHeader, IonRow,
   IonToolbar, useIonAlert,
-  useIonModal
+  useIonModal, useIonToast
 } from "@ionic/react";
 import {eegPdfDoc, eegStar} from "../../eegIcons";
 import {ContractInfo, EegParticipant} from "../../models/members.model";
@@ -26,6 +26,7 @@ interface ContractDocumentComponentProps {
 const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, participant}) => {
   const [contractDocs, setContractDocs] = useState<ContractInfo[]>([])
   const [presentAlert] = useIonAlert();
+  const [toaster] = useIonToast();
 
   useEffect(() => {
     if (tenant && participant) {
@@ -59,8 +60,50 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
   //   }
   // }
 
+  // files dropped on the contract area: the upload dialog opens with them in its list (they are confirmed there)
+  const droppedFiles = useRef<File[]>([])
+  const [dragOver, setDragOver] = useState(false)
+  const isFileDrag = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files")
+  const onAreaDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return
+    e.preventDefault()
+    setDragOver(true)
+  }
+  const onAreaDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    // only when leaving the area, not when moving onto one of its elements
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false)
+  }
+  const onAreaDrop = (e: DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(e)) return
+    e.preventDefault()
+    setDragOver(false)
+    const files = Array.from(e.dataTransfer?.files ?? [])
+    if (files.length === 0) return
+    droppedFiles.current = files
+    openModal()
+  }
+  // opening with the button starts without dropped files
+  const openFromButton = () => {
+    droppedFiles.current = []
+    openModal()
+  }
+  // while the member page shows the contracts, a file dropped beside the area must not make the browser open it
+  // (and leave the app); the area and an open upload dialog handle their own drops
+  useEffect(() => {
+    const isFiles = (e: globalThis.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files")
+    const guard = (e: globalThis.DragEvent) => { if (isFiles(e)) e.preventDefault() }
+    window.addEventListener("dragover", guard)
+    window.addEventListener("drop", guard)
+    return () => {
+      window.removeEventListener("dragover", guard)
+      window.removeEventListener("drop", guard)
+    }
+  }, [])
+
   const [present, dismiss] = useIonModal(UploadContractFilesDialog, {
     participant,
+    // read when the dialog mounts; side-effect free, as StrictMode calls a state initializer twice
+    initialFiles: () => droppedFiles.current,
     onDismiss: (data: FormData, role: string) => dismiss(data, role),
     uploadButtonText: "Hochladen",
     children: (
@@ -77,14 +120,20 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
           const data:FormData = ev.detail.data
           Api.fileService.uploadContractDocuments(tenant, participant.id, data.getAll("docfiles")
             .map(e => e as File))
-            .then((r) => {
-              const fileInfo = {id: r.data.addFile.id,
-                fileCategory: "contract",
-                createdAt: r.data.addFile.createdAt,
-                name: r.data.addFile.name,
-                userId: participant.id} as ContractInfo
-              setContractDocs(prev => [...prev, fileInfo])
-            })
+            .catch((e: Error) => toaster({
+              message: `Vertrag konnte nicht hochgeladen werden: ${e.message}`,
+              duration: 8000,
+              position: 'bottom',
+              color: "danger"
+            }))
+            .finally(() => Api.fileService.loadContractDocumentInfos(tenant, participant.id)
+              .then(docs => setContractDocs(docs))
+              .catch(() => toaster({
+                message: "Vertragsliste konnte nicht neu geladen werden.",
+                duration: 3500,
+                position: 'bottom',
+                color: "danger"
+              })))
         }
       },
       cssClass: "upload-contract",
@@ -110,7 +159,12 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
         if (e.detail.role === 'confirm') {
           Api.fileService.deleteContractDocuments(tenant, c.id).then(() => {
             setContractDocs((d) => d.filter(e => e.id !== c.id))
-          })
+          }).catch((e: unknown) => toaster({
+            message: `Die Datei ${c.name} konnte nicht gelöscht werden.${e instanceof Error && e.message ? ` (${e.message})` : ""}`,
+            duration: 4500,
+            position: 'bottom',
+            color: "danger"
+          }))
         }
       },
     })
@@ -141,7 +195,7 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
              <IonLabel>Noch keine Verträge für das Mitglied {participant.lastname} hochgeladen.</IonLabel>
            </IonItem>
            <IonItem lines="none" color="warning-light">
-             <IonButton slot="end" color="warning" size="default" onClick={openModal}>Hochladen</IonButton>
+             <IonButton slot="end" color="warning" size="default" onClick={openFromButton}>Hochladen</IonButton>
            </IonItem>
          </IonCard>
        </div>
@@ -152,7 +206,7 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
       <div className="ion-padding">
         <IonToolbar>
           <IonLabel><h1>Verträge</h1></IonLabel>
-          <IonButton slot="end" onClick={openModal}>Hinzufügen</IonButton>
+          <IonButton slot="end" onClick={openFromButton}>Hinzufügen</IonButton>
         </IonToolbar>
         <IonList>
         {
@@ -174,7 +228,8 @@ const ContractDocumentComponent: FC<ContractDocumentComponentProps> = ({tenant, 
   }
 
   return (
-    <div>
+    <div className={dragOver ? "contract-drop-area drag-over" : "contract-drop-area"} data-testid="contract-area"
+         onDragOver={onAreaDragOver} onDragLeave={onAreaDragLeave} onDrop={onAreaDrop}>
       {renderContent()}
     </div>  )
 }

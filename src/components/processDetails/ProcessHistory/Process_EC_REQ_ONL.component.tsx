@@ -5,7 +5,7 @@ import {EdaHistories, Eeg} from "../../../models/eeg.model";
 import PaginationComponent from "../../core/Pagination.component";
 import {EdaHistory, EdaHistoryGroup, EdaResponseCode} from "../../../models/process.model";
 import {EegParticipant} from "../../../models/members.model";
-import {renderAccordionBody} from "./ProcessHistory.functions";
+import {formatHistoryDate, mergeProtocolEntries, renderAccordionBody, REVOKE_PROTOCOLS} from "./ProcessHistory.functions";
 
 
 export const Process_EC_REQ_ONL_MY_REQ_ONL:FC<{eeg: Eeg, protocols: string[], participants: EegParticipant[], historyDate:[Date | null, Date | null]}> = ({eeg, protocols, participants, historyDate}) => {
@@ -34,7 +34,7 @@ export const Process_EC_REQ_ONL_MY_REQ_ONL:FC<{eeg: Eeg, protocols: string[], pa
   const getEntriesForProcessId = (process: string, entries: EdaHistories): Record<string, EdaHistory[]> => {
     switch (process) {
       case "CM_REV_IMP":
-        return {...entries[process], ...entries["CM_REV_SP"]}
+        return mergeProtocolEntries(REVOKE_PROTOCOLS, entries)
       default:
         return entries[process]
     }
@@ -57,7 +57,7 @@ export const Process_EC_REQ_ONL_MY_REQ_ONL:FC<{eeg: Eeg, protocols: string[], pa
       case "CM_REV_IMP": {
         const history_cm = msg.map((e) => {
           e.date = new Date(e.date)
-          e.responseCode = e.message.consentEnd ? new Date(e["message"].consentEnd).toDateString() : "-"
+          e.responseCode = e.message.consentEnd ? formatHistoryDate(new Date(e["message"].consentEnd)) : "-"
 
           switch (e.processType) {
             case "ANTWORT_CCMS":
@@ -74,9 +74,10 @@ export const Process_EC_REQ_ONL_MY_REQ_ONL:FC<{eeg: Eeg, protocols: string[], pa
               e.meteringPoints = e["message"]["meter"].meteringPoint ? [e["message"]["meter"].meteringPoint] : []
               break;
             case "AUFHEBUNG_CCMI":
+            case "AUFHEBUNG_CCMC":
               e.meteringPoint = e["message"]["responseData"].reduce((z: string, r: Record<string, any>) => r.meteringPoint ? r.meteringPoint : z, "-")
               e.meteringPoints = e["message"]["responseData"].map((m: Record<string, any>) => m.meteringPoint)
-              e.responseCode = e["message"]["responseData"].reduce((z: string, r: Record<string, any>) => r.consentEnd ? new Date(r.consentEnd).toDateString() : z, "-")
+              e.responseCode = e["message"]["responseData"].reduce((z: string, r: Record<string, any>) => r.consentEnd ? formatHistoryDate(new Date(r.consentEnd)) : z, "-")
               break
             default:
               e.responseCode = "-"
@@ -108,7 +109,7 @@ export const Process_EC_REQ_ONL_MY_REQ_ONL:FC<{eeg: Eeg, protocols: string[], pa
               e.responseCode = e["message"]["responseData"].reduce((z: string, r: Record<string, any>) => r.responseCode ? EdaResponseCode.getMessage(r.responseCode[0]) : z, "-")
               break
             case "ANFORDERUNG_PT":
-              e.responseCode = e.message.timeline ? new Date(e.message.timeline.from).toDateString() + " - " + new Date(e.message.timeline.to).toDateString() : ""
+              e.responseCode = e.message.timeline ? formatHistoryDate(new Date(e.message.timeline.from)) + " - " + formatHistoryDate(new Date(e.message.timeline.to)) : ""
           }
           return e
         })

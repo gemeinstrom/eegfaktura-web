@@ -1,7 +1,6 @@
 import React, {FC, ReactNode} from "react";
 import {EegParticipant} from "../../models/members.model";
 import {
-  CheckboxCustomEvent,
   IonCol,
   IonGrid,
   IonIcon,
@@ -14,26 +13,24 @@ import {eegSumSign} from "../../eegIcons";
 import MemberNameComponent from "./MemberName.component";
 import {useAppSelector} from "../../store";
 import {selectBillById} from "../../store/billing";
+import {billTotal} from "./ParticipantPane.functions";
+import {formatDecimal2} from "../../util/Number.util";
 
 interface MemberProps {
   participant: EegParticipant;
   children?: ReactNode;
-  isChecked: boolean;
   hideMember: boolean;
   hideMeter: boolean;
   showAmount: boolean;
-  onCheck: (e: CheckboxCustomEvent) => void;
   showDetailsPage: (participant: EegParticipant) => void;
   onShowAddMeterPage: (p: EegParticipant) => (e: React.MouseEvent<HTMLIonButtonElement, MouseEvent>) => void
 }
 
 const MemberComponent: FC<MemberProps> = ( {participant,
                                              children,
-                                             isChecked,
                                              hideMember,
                                              hideMeter,
                                              showAmount,
-                                             onCheck,
                                              showDetailsPage,
                                              onShowAddMeterPage}) => {
 
@@ -47,8 +44,8 @@ const MemberComponent: FC<MemberProps> = ( {participant,
 
   const memberSum = () => {
     if (memberBill) {
-      const sum = memberBill.meteringPoints.reduce((i,s) => i + s.amount, memberBill.participantFee);
-      return (Math.round(sum * 100) / 100).toFixed(2);
+      const sum = billTotal(memberBill);
+      return formatDecimal2(Math.round(sum * 100) / 100);
     }
     return 0;
   }
@@ -58,7 +55,7 @@ const MemberComponent: FC<MemberProps> = ( {participant,
     <IonGrid fixed={true} style={{paddingBottom: "0px", paddingTop: "0px", maxWidth:"380px"}}>
       { hideMember || (
         <IonRow class="ion-align-items-center" style={{"--ion-background-color": "transparent", "--ion-item-background": "transparent", flexWrap: "nowrap"}}>
-          <MemberNameComponent data-testid="member-name" participant={participant} isChecked={isChecked} onCheck={onCheck} showAmount={showAmount} onAdd={onShowAddMeterPage}/>
+          <MemberNameComponent data-testid="member-name" participant={participant} showAmount={showAmount} onAdd={onShowAddMeterPage}/>
         </IonRow>
       )}
       <IonRow>

@@ -48,9 +48,25 @@ export interface IntermediateRecord {
   production: number[]  // Production total value of energy production - value for GENERATOR
 }
 
+// ZVT (zeitvariabler Tarif): generisches Zeitfenster fuer den energystore-
+// Report-Request. from inklusiv, to exklusiv; from > to = Mitternachtsueberlauf.
+export interface TariffTimeWindow {
+  key: "T1" | "T2"
+  from: string // HH:MM
+  to: string   // HH:MM
+}
+
+// Fenster-Teilsumme je Zaehlpunkt aus dem energystore-Report;
+// BASE ist das Residuum (Summe buckets == Periodensumme).
+export interface EnergyBucket {
+  key: "BASE" | "T1" | "T2"
+  kWh: number
+}
+
 export interface Report {
   summary: Record
   intermediate: IntermediateRecord
+  buckets?: EnergyBucket[]
 }
 
 export interface MeterReport {
@@ -58,6 +74,7 @@ export interface MeterReport {
   meterDir: "GENERATION" | "CONSUMPTION"
   from: number
   until: number
+  timeWindows?: TariffTimeWindow[]
   report: Report
 }
 
@@ -144,6 +161,7 @@ export interface ReportNamedData extends SummaryReportData {
   name: string
   cntConsumer: number
   cntProducer: number
+  unused?: number   // producer P.01 (community surplus); energystore sends it, older code ignored it
 }
 
 export interface CombinedReportData {

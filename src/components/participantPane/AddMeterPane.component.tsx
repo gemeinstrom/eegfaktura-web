@@ -3,7 +3,7 @@ import CorePageTemplate from "../core/CorePage.template";
 import {Metering, ParticipantState} from "../../models/meteringpoint.model";
 import EegWebContentPaneComponent from "../EegWebContentPane.component";
 import {IonButton, IonFooter, IonToolbar} from "@ionic/react";
-import {ParticipantContext} from "../../store/hook/ParticipantProvider";
+import {ParticipantContext, useReportUnsaved} from "../../store/hook/ParticipantProvider";
 import EegPaneTemplate from "../core/EegPane.template";
 import MeterFormElement from "../core/MeterForm.element";
 import {FormProvider, useForm} from "react-hook-form";
@@ -12,8 +12,9 @@ import {useAppDispatch, useAppSelector} from "../../store";
 import {ratesSelector} from "../../store/rate";
 import {selectedTenant} from "../../store/eeg";
 import MeterAddressFormElement from "../core/forms/MeterAddressForm/MeterAddressForm.element";
-import {useGridOperator, useOnlineState, useTenant} from "../../store/hook/Eeg.provider";
+import {useOnlineState, useTenant} from "../../store/hook/Eeg.provider";
 import moment from "moment";
+import UnsavedChangesGuard, {useConfirmDiscard} from "../core/UnsavedChangesGuard.component";
 
 const AddMeterPaneComponent: FC = () => {
 
@@ -23,7 +24,6 @@ const AddMeterPaneComponent: FC = () => {
   const participant = useAppSelector(selectedParticipantSelector);
 
   const isOnline = useOnlineState()
-  const {gridOperatorId, gridOperatorName} = useGridOperator()
 
   const meter = {
     status: isOnline ? "INIT" : "ACTIVE",
@@ -32,8 +32,6 @@ const AddMeterPaneComponent: FC = () => {
     meteringPoint: "",
     direction: "CONSUMPTION",
     registeredSince: moment.utc().toDate(),
-    gridOperatorName: gridOperatorName,
-    gridOperatorId: gridOperatorId,
     // participantState: {activeSince: new Date(Date.now()), inactiveSince: moment.utc([2999, 11, 31]).toDate()} as ParticipantState,
     activationMode: 'ONLINE'
   } as Metering
@@ -44,35 +42,45 @@ const AddMeterPaneComponent: FC = () => {
   const {
     setShowAddMeterPane,
   } = useContext(ParticipantContext);
+  const confirmDiscard = useConfirmDiscard()
+
+  // the member list asks before another member replaces unsaved input (platform#228 step 4)
+  useReportUnsaved("addMeter", isDirty)
 
   useEffect(() => {
     reset(meter)
     // setShowAddMeterPane(false);
   }, [participant])
 
-  const onChancel = () => {
+  const onChancel = () => confirmDiscard(isDirty, () => {
     reset(meter)
     setShowAddMeterPane(false);
-  }
+  })
 
   const onSubmit = (meter: Metering) => {
     if (isDirty && participant) {
       let participantId = participant.id;
       meter.participantId = participantId
 
+      // close only after the save worked; on failure the input stays (error toast: store middleware)
       dispatcher(registerMeteringpoint({tenant, participantId, meter}))
-      reset(meter);
-      setShowAddMeterPane(false);
+        .unwrap()
+        .then(() => {
+          reset(meter);
+          setShowAddMeterPane(false);
+        })
+        .catch(() => {})
     }
   }
   return (
     <EegWebContentPaneComponent>
+      <UnsavedChangesGuard dirty={isDirty}/>
       <CorePageTemplate>
         <form id="submit-register-meter" onSubmit={handleSubmit((data) => onSubmit(data))}>
           <EegPaneTemplate>
             <FormProvider {...formMethods}>
               <MeterFormElement rates={rates} participant={participant}/>
-              <MeterAddressFormElement participant={participant} isEditable={true} isOnline={isOnline} showActivationMode={true}/>
+              <MeterAddressFormElement participant={participant} isEditable={true} isOnline={isOnline}/>
             </FormProvider>
           </EegPaneTemplate>
         </form>
