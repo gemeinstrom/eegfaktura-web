@@ -1,3 +1,5 @@
+import {EnergyBucket, TariffTimeWindow} from "./energy.model";
+
 export interface ParticipantState {
   activeSince: Date
   inactiveSince: Date
@@ -41,9 +43,12 @@ export interface Metering {
   processState: MeteringProcessStateType,
   participantState: ParticipantState,
   partFact: number,
-  activationCode?: string
   activationMode: 'ONLINE' | 'OFFLINE'
   enabled: boolean
+  // from the grid operator's metering point list (platform#229), read only, null = unknown; not shown in V1
+  // (platform#246). The saves send them along, the backend ignores them
+  techCode?: string | null
+  fuelCode?: string | null
 }
 
 /*
@@ -71,14 +76,24 @@ export interface ClearingPreviewResponse {
   participantAmounts: ParticipantBillType[];
 }
 
+// Antwort des asynchronen Abrechnungsstarts (POST /api/billing):
+// 202 = gestartet, 409 = läuft bereits (billingRunId des laufenden Laufs),
+// 400/503 = abgelehnt (abstractText = Meldung). Siehe konzept-async-billing-run.md.
+export interface ClearingStartResponse {
+  status: number;
+  billingRunId?: string;
+  abstractText?: string;
+}
+
 //@TODO: Refactor diesen Type --> billing.model.ts (o.ä.)
 export interface BillingRun {
   id: string;
   clearingPeriodType: string;
   clearingPeriodIdentifier: string;
   tenantId: string;
-  runStatus: "NEW" | "DONE" | "CANCELLED";
+  runStatus: "NEW" | "DONE" | "CANCELLED" | "RUNNING" | "FAILED";
   runStatusDateTime: string;
+  errorSummary?: string;
   mailStatus: string;
   mailStatusDateTime: string;
   sepaStatus: string;
@@ -97,10 +112,28 @@ export interface InvoiceDocumentResponse {
   participantId: string;
 }
 
+// The amounts of one billing document (billing: GET /billingRuns/{id}/billingDocuments); only the fields used here.
+export interface BillingDocumentAmounts {
+  billingDocumentType: "INVOICE" | "CREDIT_NOTE" | "CREDIT_NOTE_RC" | "INFO";
+  netAmountInEuro: number | null;
+  vat1Percent: number | null;
+  vat1SumInEuro: number | null;
+  vat2Percent: number | null;
+  vat2SumInEuro: number | null;
+  grossAmountInEuro: number | null;
+  participantId: string | null;
+  recipientName: string | null;
+}
+
 export interface MeteringEnergyGroupType {
   participantId: string;
   meteringPoint: string;
   allocationKWh: number;
+  // ZVT: Fenster-Teilsummen aus dem energystore-Report + verwendete
+  // Fenster-Definitionen (Konsistenz-Guard in billing). Nur bei
+  // zeitbasierten Tarifen gesetzt.
+  buckets?: EnergyBucket[];
+  timeWindows?: TariffTimeWindow[];
 }
 
 export interface MeteringBillType {
@@ -112,5 +145,9 @@ export interface ParticipantBillType {
   id: string;
   amount: number;
   participantFee: number;
+  // Missing from older billing versions.
+  meteringPointFeeSum?: number;
+  // platform#217, gross; missing from older billing versions.
+  joiningFee?: number;
   meteringPoints: MeteringBillType[]
 }

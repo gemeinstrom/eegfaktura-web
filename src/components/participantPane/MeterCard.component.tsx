@@ -4,6 +4,7 @@ import {eegExclamation, eegPlug, eegSolar} from "../../eegIcons";
 import {EegParticipant} from "../../models/members.model";
 import {Metering} from "../../models/meteringpoint.model";
 import cn from "classnames"
+import moment from "moment";
 
 import "./Member.component.css";
 import {useAppSelector} from "../../store";
@@ -12,6 +13,7 @@ import {ConsumerReport, ProducerReport} from "../../models/energy.model";
 import {selectRateById} from "../../store/rate";
 import {selectBillByMeter} from "../../store/billing";
 import {formatMeteringPointString} from "../../util/Helper.util";
+import {formatDecimal2} from "../../util/Number.util";
 import unset from "react-hook-form/dist/utils/unset";
 
 interface MeterCardComponentProps {
@@ -61,20 +63,24 @@ const MeterCardComponent: FC<MeterCardComponentProps> = ({participant, meter, hi
   const isPending = () => participant.status === 'PENDING';
   const isGenerator = (m: Metering) => m.direction === 'GENERATION';
   const isMeterPending = () => isPending() || meter.processState === 'NEW' || meter.processState === 'PENDING';
-  const isMeterRejected = () => meter.processState === "REVOKED" || meter.processState === "REJECTED"
+  const isMeterRejected = () => meter.processState === "REVOKED" || meter.processState === "REJECTED" || meter.processState === "INVALID"
   const isMeterActive = () => meter.processState === "ACTIVE" || meter.processState === "INACTIVE"
   const isMeterInactive = () => meter.processState === "INACTIVE"
+  // true once the last day of participation (inactiveSince, inclusive, local day) is over; a deregistration
+  // confirmed with an end date still ahead keeps the normal colour
+  const hasLeft = () => !!meter.participantState?.inactiveSince &&
+    moment(meter.participantState.inactiveSince).endOf('day').isBefore(moment())
 
   const meterValue = () => {
     if (report && !isNaN(report.allocated)) {
       if (showCash && tariff) {
-        return (<><span>{bill.toFixed(2)}</span><span style={{fontSize:"12px"}}> €</span></>);
+        return (<><span>{formatDecimal2(bill)}</span><span style={{fontSize:"12px"}}> €</span></>);
       }
       // return (<><span>{(Math.round(report?.allocated! * 10) / 10)}</span><span style={{fontSize:"10px"}}> kWh</span></>);
 
-      let value = report.allocated.toFixed(2);
+      let value = formatDecimal2(report.allocated);
       if ('produced' in report && !isNaN(report.produced)) {
-        value = (report.produced - report.allocated).toFixed(2)
+        value = formatDecimal2(report.produced - report.allocated)
       }
       // return (<><span>{report ? report?.allocated!.toFixed(2) : 0}</span><span style={{fontSize:"10px"}}> kWh</span></>);
       return (<><span>{value}</span><span style={{fontSize:"10px"}}> kWh</span></>);
@@ -110,7 +116,8 @@ const MeterCardComponent: FC<MeterCardComponentProps> = ({participant, meter, hi
       <IonGrid fixed={true} style={{paddingTop: "12px"}}>
         <IonRow style={meterColorStyle()}>
           <IonCol size={"1"}>
-            <IonIcon icon={isMeterRejected() || isMeterInactive() ? eegExclamation : isGenerator(meter) ? eegSolar : eegPlug} size="small"></IonIcon>
+            <IonIcon icon={isMeterRejected() || isMeterInactive() ? eegExclamation : isGenerator(meter) ? eegSolar : eegPlug} size="small"
+                     style={isMeterInactive() && hasLeft() ? {color: "#dc1e1e"} : undefined}></IonIcon>
           </IonCol>
           <IonCol size={isMeterPending() ? "11" : "7"}>
             {/*<IonLabel style={{textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap"}}>{participant.participant.meters[0].meteringPoint}</IonLabel>*/}

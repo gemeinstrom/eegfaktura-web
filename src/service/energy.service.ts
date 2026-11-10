@@ -13,6 +13,9 @@ import {AuthService} from "./auth.service";
 import {reportDateGraphqlQuery, uploadEnergyGraphqlMutation} from "./graphql-query";
 import {ExcelReportRequest} from "../models/reports.model";
 import {ActiveTenant} from "../models/eeg.model";
+import {BillingCheckRequest, BillingCheckResponse} from "../models/billingCheck.model";
+
+const NO_ENERGY_DATA_YET = "Record doesn't exist"
 
 export class EnergyService extends BaseService {
   public constructor(authService: AuthService) {
@@ -29,7 +32,18 @@ export class EnergyService extends BaseService {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({reportInterval: {type: type, year: year, segment: segment}, participants: participants})
-    }).then(this.handleErrors).then(res => res.json());
+    }).then(async res => {
+      // energystore v1 answers 500 "Record doesn't exist" while no energy data was ever imported for the
+      // community (its metadata is missing): that is an empty report, not a failed load (261024-ca6)
+      if (res.status === 500) {
+        const body = await res.clone().json().catch(() => undefined)
+        if (body?.error === NO_ENERGY_DATA_YET) {
+          return {id: `${type}/${year}/${String(segment).padStart(2, "0")}`, participantReports: [], meta: [],
+            totalProduction: 0, totalConsumption: 0} as EnergyReportResponse
+        }
+      }
+      return this.handleErrors(res).then(r => r.json())
+    });
   }
 
   async fetchLastReportEntryDate(tenant: string, ecId: string, token?: string): Promise<string> {
@@ -106,6 +120,20 @@ export class EnergyService extends BaseService {
     }).then(this.handleErrors).then(res => res.json());
   }
 
+  // Load curve of an explicit window; for one day (start 00:00, end 23:45) energystore returns the quarter hours.
+  async fetchLoadCurveRangeV2(tenant: ActiveTenant, start: number, end: number): Promise<ReportNamedData[]> {
+    const token = await this.lookupToken()
+    return await fetch(`${ENERGY_API_SERVER}/eeg/v2/${tenant.ecId}/load-curve-report`, {
+      method: 'POST',
+      headers: {
+        ...this.getSecureHeadersX(token, tenant.rcNr),
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({start, end})
+    }).then(this.handleErrors).then(res => res.json());
+  }
+
   async fetchCombinedReportV2(tenant: ActiveTenant, reports: string[], selectedPeroid: SelectedPeriod): Promise<CombinedReportData[]> {
     const token = await this.lookupToken()
     return await fetch(`${ENERGY_API_SERVER}/eeg/v2/${tenant.ecId}/combined-report`, {
@@ -159,6 +187,30 @@ export class EnergyService extends BaseService {
     })
       .then(this.handleErrors)
       .then( response => this.handleDownload(response, "energy-export"));
+  }
+
+  async fetchBillingCheck(tenant: ActiveTenant, payload: BillingCheckRequest, signal?: AbortSignal, timeoutMs = 60000): Promise<BillingCheckResponse> {
+    const controller = new AbortController()
+    signal?.addEventListener('abort', () => controller.abort(), {once: true})
+    const token = await this.lookupToken()
+    if (controller.signal.aborted) {
+      return Promise.reject(new DOMException("aborted", "AbortError"))
+    }
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      return await fetch(`${ENERGY_API_SERVER}/eeg/v2/${tenant.ecId}/billing-check`, {
+        method: 'POST',
+        headers: {
+          ...this.getSecureHeadersX(token, tenant.rcNr),
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }).then(this.handleErrors).then(res => res.json());
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   // async fetchReport(tenant: string, ecId: string, year: number, segment: number, type: string, token?: string): Promise<EegEnergyReport> {

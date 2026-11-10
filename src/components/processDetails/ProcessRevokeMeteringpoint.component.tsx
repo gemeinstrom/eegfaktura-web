@@ -1,8 +1,10 @@
-import React, {FC, forwardRef, useEffect, useState} from "react";
-import {IonButton, IonContent, IonInput, IonItem, useIonToast} from "@ionic/react";
+import React, {FC, useEffect, useRef, useState} from "react";
+import {IonButton, IonContent, IonItem, useIonToast} from "@ionic/react";
 import InputForm from "../form/InputForm.component";
 import SelectForm from "../form/SelectForm.component";
 import DatePicker from "react-datepicker";
+import DateTextInput from "../form/DateTextInput.component";
+import {DATE_PICKER_PROPS} from "../../util/DateFormat.util";
 import {useForm} from "react-hook-form";
 import {Metering} from "../../models/meteringpoint.model";
 import {EdaProcess, Eeg} from "../../models/eeg.model";
@@ -12,10 +14,13 @@ import ProcessHeaderComponent from "./ProcessHeader.component";
 import ProcessContentComponent from "./ProcessContent.component";
 import {BasicSelectComponent, SelectOptions} from "../form/BasicSelect.component";
 import {Api} from "../../service";
-import {meteringDisplayName} from "../../util/FilterHelper";
+import {meteringDisplayName, selectedMeters} from "../../util/FilterHelper";
 import {useLocale} from "../../store/hook/useLocale";
 import {JoinStrings} from "../../util/Helper.util";
 import moment from "moment";
+import {useProcessFeedback} from "./useProcessFeedback";
+import {useConfirm} from "../core/useConfirm";
+import {revokeSummary} from "./ProcessConfirm.functions";
 
 interface ProcessValues {
   communityId: string | undefined
@@ -39,6 +44,7 @@ const ProcessRevokeMeteringpointComponent: FC<ProcessRevokeMeteringpointComponen
   }
 
   const {t} = useLocale("common")
+  const {sent, failed} = useProcessFeedback()
   const {t: errorT} = useLocale("error")
 
   const {handleSubmit, reset,
@@ -46,10 +52,12 @@ const ProcessRevokeMeteringpointComponent: FC<ProcessRevokeMeteringpointComponen
     setValue, formState} = useForm<ProcessValues>({defaultValues: processValues})
   const [useableMeters, setUsableMeters] = useState<Metering[]>([])
   const [consentEndDate, setConsentEndDate] = useState<Date|null>(null);
+  const picker = useRef<DatePicker<never, false>>(null)
   const [reason, setReason] = useState<string|undefined>()
   const [meteringPoints, participantId] = watch(['meteringPoints', 'participantId'])
 
   const [toaster] = useIonToast();
+  const confirm = useConfirm()
 
   const infoToast = (message: string) => {
     toaster({
@@ -80,40 +88,32 @@ const ProcessRevokeMeteringpointComponent: FC<ProcessRevokeMeteringpointComponen
     }
   }, [participantId])
 
-  const onRequest = (data: ProcessValues) => {
+  const onRequest = async (data: ProcessValues) => {
     if (data.participantId && data.meteringPoints && consentEndDate) {
 
-      const meter = meters.filter((m) => data.meteringPoints?.find((s:string) => s === m.meteringPoint))
-      if (meter) {
+      const meter = selectedMeters(useableMeters, data.meteringPoints)
+      if (meter.length > 0) {  // empty: the selection does not belong to the chosen participant
         if (meter.filter(m => !(m.consentId && m.consentId.length > 0)).length === 0) {
-          Api.eegService.revokeMeteringPoint(
-            eeg.id.toUpperCase(), data.participantId,
+          // revoking ends the data consent at the grid operator: ask first
+          const participantId = data.participantId, endDate = consentEndDate
+          // awaited: the submit stays disabled while the dialog is open and the request runs (no second revoke)
+          if (!await confirm("Datenfreigabe aufheben", revokeSummary(meter, endDate), "Aufheben")) return
+          return Api.eegService.revokeMeteringPoint(
+            eeg.id.toUpperCase(), participantId,
             meter.map(m => {return {meter: m.meteringPoint, direction: m.direction, consentId: m.consentId}}),
-            consentEndDate.getTime(), reason)
-            .finally(() => {
+            endDate.getTime(), reason)
+            .then(() => {
+              sent()
               reset()
               setConsentEndDate(null)
             })
+            .catch(failed)  // keep the input on failure
         } else {
           errorToast(errorT("process.revoke_consentIdEmpty"))
         }
       }
     }
   }
-
-  const Component = forwardRef<HTMLIonInputElement, {}>(function CustomInput(p, ref) {
-    return (
-      <IonInput
-        {...p}
-        label={t("button_labels.calendar")}
-        placeholder="Enter text"
-        fill="outline"
-        labelPlacement={"floating"}
-        ref={ref}
-      >
-      </IonInput>
-    );
-  });
 
   return (
     <>
@@ -123,13 +123,13 @@ const ProcessRevokeMeteringpointComponent: FC<ProcessRevokeMeteringpointComponen
           <>
             <InputForm name="communityId" label={t("common-info.community-id")} control={control} protectedControl={true}/>
             <BasicSelectComponent control={control} name={"participantId"}
-                                  options={participants
+                                  options={[...participants]
                                     .sort((a,b) => a.lastname && b.lastname ? a.lastname.localeCompare(b.lastname) : a.firstname.localeCompare(b.firstname))
                                     .map((p) => {
               return {value: p.id, label: JoinStrings(" ", " - ", p.participantNumber, (p.lastname ? p.lastname : ""), p.firstname)} as SelectOptions
             })} label={t("participant")} rules={{required: true}}/>
             <SelectForm control={control} name={"meteringPoints"} options={useableMeters.map((p) => {
-              return {key: p.meteringPoint, value: meteringDisplayName(p)}
+              return {key: p.meteringPoint, value: meteringDisplayName(p, t)}
             })} label={t("metering")} selectInterface={"popover"} multiple={true} rules={{required: true}}/>
             <InputForm name="reason" label={t("process.revokeMeter.reason")} control={control}/>
             <div className="form-element">
@@ -139,12 +139,16 @@ const ProcessRevokeMeteringpointComponent: FC<ProcessRevokeMeteringpointComponen
                 onChange={(update) => {
                   setConsentEndDate(update);
                 }}
-                customInput={<Component/>}
-                minDate={moment(Date.now()).add(1, 'day').toDate()}
+                customInput={<DateTextInput label={t("button_labels.calendar")}/>}
+                placeholderText="Datum wählen"
+                ref={picker}
+                onBlur={() => picker.current?.setOpen(false, true)} // drops typed text that is no valid date
+                {...DATE_PICKER_PROPS}
+                minDate={moment(Date.now()).add(1, 'day').startOf('day').toDate()}
               />
             </div>
             <IonItem lines="none" style={{zIndex: "0"}}>
-              <IonButton slot="end" onClick={handleSubmit(onRequest)} disabled={(!formState.isValid || !consentEndDate)}>
+              <IonButton slot="end" onClick={handleSubmit(onRequest)} disabled={(!formState.isValid || !consentEndDate || formState.isSubmitting)}>
                 {t("process.submit")}
               </IonButton>
             </IonItem>
